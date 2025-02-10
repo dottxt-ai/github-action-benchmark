@@ -956,7 +956,11 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                 const h1 = query('h1');
                 expect(1).toEqual(h1.length);
                 const benchmarkText =
-                    config.alertThreshold === 0 ? '' : config.name === 'Benchmark' ? '' : ` for '${config.name}'`;
+                    config.alertThreshold === 0
+                        ? ''
+                        : config.name === 'Benchmark'
+                        ? ''
+                        : ` for '${config.name}'`;
                 expect(`Performance Report${benchmarkText}`).toEqual(h1.text());
 
                 const tr = query('tbody tr');
