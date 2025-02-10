@@ -219,7 +219,10 @@ export function buildComment(
         '',
         expandableDetails ? '<details>' : '',
         '',
-        `| Benchmark suite | Current: ${curSuite.commit.id} | Previous: ${prevSuite.commit.id} | Ratio |`,
+        `Previous: ${prevSuite.commit.id}`,
+        `Current: ${curSuite.commit.id}`,
+        '',
+        `| Benchmark suite | Current | Previous | Ratio |`,
         '|-|-|-|-|',
     ];
 
@@ -262,7 +265,10 @@ function buildAlertComment(
         `Possible performance regression was detected for benchmark${benchmarkText}.`,
         `Benchmark result of this commit is worse than the previous benchmark result exceeding threshold \`${thresholdString}\`.`,
         '',
-        `| Benchmark suite | Current: ${curSuite.commit.id} | Previous: ${prevSuite.commit.id} | Ratio |`,
+        `Previous commit: ${prevSuite.commit.id}`,
+        `Current commit: ${curSuite.commit.id}`,
+        '',
+        `| Benchmark suite | Current | Previous | Ratio |`,
         '|-|-|-|-|',
     ];
 
