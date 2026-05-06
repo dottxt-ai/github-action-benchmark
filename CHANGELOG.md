@@ -1,5 +1,14 @@
 ## Unreleased
 
+<a name="v1.22.1"></a>
+# [v1.22.1](https://github.com/benchmark-action/github-action-benchmark/releases/tag/v1.22.1) - 6 May 2026
+- **fix** scope tsconfig.build.json to src/ for reproducibility (#352)
+- **chore** bump minimatch from 3.1.2 to 3.1.5 (#347)
+- **chore** bump uuid and @actions/core (#350)
+- **chore** bump flatted from 3.2.4 to 3.4.2 (#346)
+- **chore** bump js-yaml (#344)
+- **chore** bump picomatch from 2.3.0 to 2.3.2 (#342)
+
 <a name="v1.22.0"></a>
 # [v1.22.0](https://github.com/benchmark-action/github-action-benchmark/releases/tag/v1.22.0) - 31 Mar 2026
 - **chore** bump node to 24 (#339)
