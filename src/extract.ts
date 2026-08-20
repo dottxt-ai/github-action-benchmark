@@ -2,14 +2,19 @@
 import { promises as fs } from 'fs';
 import * as github from '@actions/github';
 import { Config, ToolType } from './config';
+import { z } from 'zod';
 
-export interface BenchmarkResult {
-    name: string;
-    value: number;
-    range?: string;
-    unit: string;
-    extra?: string;
-}
+export const BenchmarkResult = z.object({
+    name: z.coerce.string(),
+    value: z.coerce.number(),
+    range: z.coerce.string().optional(),
+    unit: z.coerce.string(),
+    extra: z.coerce.string().optional(),
+});
+
+export type BenchmarkResult = z.infer<typeof BenchmarkResult>;
+
+export const BenchmarkResults = z.array(BenchmarkResult);
 
 interface GitHubUser {
     email?: string;
@@ -338,9 +343,33 @@ function extractCargoResult(output: string): BenchmarkResult[] {
     return ret;
 }
 
-function extractGoResult(output: string): BenchmarkResult[] {
-    const lines = output.split(/\r?\n/g);
-    const ret = [];
+function containsPackageRef(name: string, pkg: string): boolean {
+    const segments = pkg.split('/');
+    // Require at least 2 segments to avoid false positives (e.g., "cache" appearing in BenchmarkCache)
+    const minSegments = 2;
+    for (let i = 0; i <= segments.length - minSegments; i++) {
+        const suffix = segments.slice(i).join('/');
+        if (name.includes(suffix)) return true;
+        if (name.includes(suffix.replace(/\//g, '_'))) return true;
+    }
+    return false;
+}
+
+export interface GoExtractOptions {
+    forcePackageSuffix?: boolean;
+}
+
+export function extractGoResult(output: string, options: GoExtractOptions = {}): BenchmarkResult[] {
+    // Split into sections by "pkg:" lines, keeping package name with each section
+    const sections = output.split(/^pkg:\s+/m).map((section, index) => {
+        if (index === 0) return { pkg: '', lines: section.split(/\r?\n/g) };
+        const [pkg, ...rest] = section.split(/\r?\n/g);
+        return { pkg, lines: rest };
+    });
+
+    const uniquePackages = new Set(sections.map((s) => s.pkg).filter(Boolean));
+    const hasMultiplePackages = uniquePackages.size > 1;
+
     // Example:
     //   BenchmarkFib20-8           30000             41653 ns/op
     //   BenchmarkDoWithConfigurer1-8            30000000                42.3 ns/op
@@ -351,15 +380,19 @@ function extractGoResult(output: string): BenchmarkResult[] {
     // reference, "Proposal: Go Benchmark Data Format": https://go.googlesource.com/proposal/+/master/design/14313-benchmark-format.md
     // "A benchmark result line has the general form: <name> <iterations> <value> <unit> [<value> <unit>...]"
     // "The fields are separated by runs of space characters (as defined by unicode.IsSpace), so the line can be parsed with strings.Fields. The line must have an even number of fields, and at least four."
-    const reExtract =
+    const reExtractRegexp =
         /^(?<name>Benchmark\w+[\w()$%^&*-=|,[\]{}"#]*?)(?<procs>-\d+)?\s+(?<times>\d+)\s+(?<remainder>.+)$/;
 
-    for (const line of lines) {
-        const m = line.match(reExtract);
-        if (m?.groups) {
-            const procs = m.groups.procs !== undefined ? m.groups.procs.slice(1) : null;
-            const times = m.groups.times;
-            const remainder = m.groups.remainder;
+    // Flatten sections into lines with package context, then process each line
+    return sections
+        .flatMap(({ pkg, lines }) => lines.map((line) => ({ pkg, line })))
+        .flatMap(({ pkg, line }) => {
+            const match = line.match(reExtractRegexp);
+            if (!match?.groups) return [];
+
+            const { name, procs: procsRaw, times, remainder } = match.groups;
+            const procs = procsRaw?.slice(1) ?? null;
+            const extra = procs !== null ? `${times} times\n${procs} procs` : `${times} times`;
 
             const pieces = remainder.split(/[ \t]+/);
 
@@ -369,25 +402,21 @@ function extractGoResult(output: string): BenchmarkResult[] {
                 pieces.unshift(pieces[0], remainder.slice(remainder.indexOf(pieces[1])));
             }
 
-            for (let i = 0; i < pieces.length; i = i + 2) {
-                let extra = `${times} times`.replace(/\s\s+/g, ' ');
-                if (procs !== null) {
-                    extra += `\n${procs} procs`;
-                }
-                const value = parseFloat(pieces[i]);
-                const unit = pieces[i + 1];
-                let name;
-                if (i > 0) {
-                    name = m.groups.name + ' - ' + unit;
-                } else {
-                    name = m.groups.name;
-                }
-                ret.push({ name, value, unit, extra });
-            }
-        }
-    }
+            const shouldAddPackageSuffix =
+                hasMultiplePackages && pkg && (options.forcePackageSuffix || !containsPackageRef(name, pkg));
+            const baseName = shouldAddPackageSuffix ? `${name} (${pkg})` : name;
+            // Chunk into [value, unit] pairs and map to results
+            return chunkPairs(pieces).map(([valueStr, unit], i) => ({
+                name: i > 0 ? `${baseName} - ${unit}` : baseName,
+                value: parseFloat(valueStr),
+                unit,
+                extra,
+            }));
+        });
+}
 
-    return ret;
+function chunkPairs(arr: string[]): Array<[string, string]> {
+    return Array.from({ length: Math.floor(arr.length / 2) }, (_, i) => [arr[i * 2], arr[i * 2 + 1]]);
 }
 
 function extractBenchmarkJsResult(output: string): BenchmarkResult[] {
@@ -658,13 +687,11 @@ function extractBenchmarkDotnetResult(output: string): BenchmarkResult[] {
 
 function extractCustomBenchmarkResult(output: string): BenchmarkResult[] {
     try {
-        const json: BenchmarkResult[] = JSON.parse(output);
-        return json.map(({ name, value, unit, range, extra }) => {
-            return { name, value, unit, range, extra };
-        });
-    } catch (err: any) {
+        return BenchmarkResults.parse(JSON.parse(output));
+    } catch (err: unknown) {
+        const errMessage = err instanceof Error ? err.message : String(err);
         throw new Error(
-            `Output file for 'custom-(bigger|smaller)-is-better' must be JSON file containing an array of entries in BenchmarkResult format: ${err.message}`,
+            `Output file for 'custom-(bigger|smaller)-is-better' must be JSON file containing an array of entries in BenchmarkResult format: ${errMessage}`,
         );
     }
 }
@@ -673,7 +700,6 @@ function extractLuauBenchmarkResult(output: string): BenchmarkResult[] {
     const lines = output.split(/\n/);
     const results: BenchmarkResult[] = [];
 
-    output;
     for (const line of lines) {
         if (!line.startsWith('SUCCESS')) continue;
         const [_0, name, _2, valueStr, _4, range, _6, extra] = line.split(/\s+/);
@@ -700,7 +726,7 @@ export async function extractResult(config: Config): Promise<Benchmark> {
             benches = extractCargoResult(output);
             break;
         case 'go':
-            benches = extractGoResult(output);
+            benches = extractGoResult(output, { forcePackageSuffix: config.goForcePackageSuffix });
             break;
         case 'benchmarkjs':
             benches = extractBenchmarkJsResult(output);

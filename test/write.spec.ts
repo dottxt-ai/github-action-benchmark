@@ -7,8 +7,8 @@ import { Config } from '../src/config';
 import { Benchmark } from '../src/extract';
 import { DataJson, writeBenchmark } from '../src/write';
 import { expect } from '@jest/globals';
-import { FakedOctokit, fakedRepos } from './fakedOctokit';
-import { wrapBodyWithBenchmarkTags } from '../src/comment/benchmarkCommentTags';
+import { FakedOctokit, fakedPulls, fakedRepos } from './fakedOctokit';
+import { benchmarkStartTag, wrapBodyWithBenchmarkTags } from '../src/comment/benchmarkCommentTags';
 
 const ok: (x: any, msg?: string) => asserts x = (x, msg) => {
     try {
@@ -67,6 +67,7 @@ const gitHubContext = {
             private: false,
             html_url: 'https://github.com/user/repo',
         } as RepositoryPayloadSubset | null,
+        pull_request: null as { number: number } | null,
     },
     workflow: 'Workflow name',
 };
@@ -132,6 +133,7 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
 
     afterEach(function () {
         fakedRepos.clear();
+        fakedPulls.clear();
     });
 
     // Utilities for test data
@@ -188,6 +190,7 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
             maxItemsInChart: null,
             failThreshold: 2.0,
             ref: undefined,
+            goForcePackageSuffix: false,
         };
 
         const savedRepository = {
@@ -211,8 +214,10 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
             config: Config;
             data: DataJson | null;
             added: Benchmark;
+            expectedAdded?: Benchmark;
             error?: string[];
             commitComment?: string;
+            commentBody?: string[];
             repoPayload?: null | RepositoryPayloadSubset;
             gitServerUrl?: string;
         }> = [
@@ -238,6 +243,68 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                     date: lastUpdate,
                     tool: 'cargo',
                     benches: [bench('bench_fib_10', 135)],
+                },
+                gitServerUrl: serverUrl,
+            },
+            {
+                it: 'appends new result to existing data with normalized units - new unit smaller',
+                config: { ...defaultCfg, tool: 'catch2' },
+                data: {
+                    lastUpdate,
+                    repoUrl,
+                    entries: {
+                        'Test benchmark': [
+                            {
+                                commit: commit('prev commit id'),
+                                date: lastUpdate - 1000,
+                                tool: 'catch2',
+                                benches: [bench('bench_fib_10', 1.012, '± 0.02', 'ms')],
+                            },
+                        ],
+                    },
+                },
+                added: {
+                    commit: commit('current commit id'),
+                    date: lastUpdate,
+                    tool: 'catch2',
+                    benches: [bench('bench_fib_10', 990, '± 20', 'us')],
+                },
+                expectedAdded: {
+                    commit: commit('current commit id'),
+                    date: lastUpdate,
+                    tool: 'catch2',
+                    benches: [bench('bench_fib_10', 0.99, '± 0.02', 'ms')],
+                },
+                gitServerUrl: serverUrl,
+            },
+            {
+                it: 'appends new result to existing data with normalized units - new unit larger',
+                config: { ...defaultCfg, tool: 'catch2' },
+                data: {
+                    lastUpdate,
+                    repoUrl,
+                    entries: {
+                        'Test benchmark': [
+                            {
+                                commit: commit('prev commit id'),
+                                date: lastUpdate - 1000,
+                                tool: 'catch2',
+                                benches: [bench('bench_fib_10', 990, '± 20', 'us')],
+                            },
+                        ],
+                    },
+                },
+                added: {
+                    commit: commit('current commit id'),
+                    date: lastUpdate,
+                    tool: 'catch2',
+                    benches: [bench('bench_fib_10', 1.012, '± 0.02', 'ms')],
+                },
+                expectedAdded: {
+                    commit: commit('current commit id'),
+                    date: lastUpdate,
+                    tool: 'catch2',
+                    benches: [bench('bench_fib_10', 1012, '± 20', 'us')],
                 },
                 gitServerUrl: serverUrl,
             },
@@ -288,7 +355,7 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                                 commit: commit('prev commit id'),
                                 date: lastUpdate - 1000,
                                 tool: 'pytest',
-                                benches: [bench('bench_fib_10', 100)],
+                                benches: [bench('bench_fib_10', 100), bench('bench_fib_20', 900)],
                             },
                         ],
                         'Other benchmark': [
@@ -305,7 +372,13 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                     commit: commit('current commit id'),
                     date: lastUpdate,
                     tool: 'pytest',
-                    benches: [bench('bench_fib_10', 135)],
+                    benches: [bench('bench_fib_10', 135), bench('bench_fib_20', 1.1, '± 0.02', 'us/iter')],
+                },
+                expectedAdded: {
+                    commit: commit('current commit id'),
+                    date: lastUpdate,
+                    tool: 'pytest',
+                    benches: [bench('bench_fib_10', 135), bench('bench_fib_20', 1100, '± 20')],
                 },
             },
             {
@@ -332,15 +405,71 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                     benches: [bench('bench_fib_10', 210), bench('bench_fib_20', 25000)], // Exceeds 2.0 threshold
                 },
                 error: [
-                    '# :warning: **Performance Alert** :warning:',
+                    "# Performance Report for **'Test benchmark'**",
                     '',
-                    "Possible performance regression was detected for benchmark **'Test benchmark'**.",
-                    'Benchmark result of this commit is worse than the previous benchmark result exceeding threshold `2`.',
+                    'Benchmark result(s) exceed ratio of `2`.',
                     '',
-                    '| Benchmark suite | Current: current commit id | Previous: prev commit id | Ratio |',
+                    'Previous commit: prev commit id',
+                    'Current commit: current commit id',
+                    '',
+                    '### :snail: The following benchmarks show regressions:',
+                    '',
+                    '| Benchmark suite | Current | Previous | Ratio |',
                     '|-|-|-|-|',
-                    '| `bench_fib_10` | `210` ns/iter (`± 20`) | `100` ns/iter (`± 20`) | `2.10` |',
-                    '| `bench_fib_20` | `25000` ns/iter (`± 20`) | `10000` ns/iter (`± 20`) | `2.50` |',
+                    '| `bench_fib_10` | `210ns/iter`<br>(`± 20ns`) | `100ns/iter`<br>(`± 20ns`) | `2.10` |',
+                    '| `bench_fib_20` | `25μs/iter`<br>(`± 20ns`) | `10μs/iter`<br>(`± 20ns`) | `2.50` |',
+                    '',
+                    `This comment was automatically generated by [workflow](${serverUrl}/user/repo/actions?query=workflow%3AWorkflow%20name) using [github-action-benchmark](https://github.com/marketplace/actions/continuous-benchmark).`,
+                    '',
+                    'CC: @user',
+                ],
+            },
+            {
+                it: 'raises an alert when exceeding threshold 2.0 - different units',
+                config: defaultCfg,
+                data: {
+                    lastUpdate,
+                    repoUrl,
+                    entries: {
+                        'Test benchmark': [
+                            {
+                                commit: commit('prev commit id'),
+                                date: lastUpdate - 1000,
+                                tool: 'go',
+                                benches: [bench('bench_fib_10', 100), bench('bench_fib_20', 900)],
+                            },
+                        ],
+                    },
+                },
+                added: {
+                    commit: commit('current commit id'),
+                    date: lastUpdate,
+                    tool: 'go',
+                    benches: [
+                        bench('bench_fib_10', 0.21, '± 0.02', 'us/iter'),
+                        bench('bench_fib_20', 2.25, '± 0.02', 'us/iter'),
+                    ], // Exceeds 2.0 threshold
+                },
+                expectedAdded: {
+                    commit: commit('current commit id'),
+                    date: lastUpdate,
+                    tool: 'go',
+                    benches: [bench('bench_fib_10', 210), bench('bench_fib_20', 2250)], // Exceeds 2.0 threshold
+                },
+                error: [
+                    "# Performance Report for **'Test benchmark'**",
+                    '',
+                    'Benchmark result(s) exceed ratio of `2`.',
+                    '',
+                    'Previous commit: prev commit id',
+                    'Current commit: current commit id',
+                    '',
+                    '### :snail: The following benchmarks show regressions:',
+                    '',
+                    '| Benchmark suite | Current | Previous | Ratio |',
+                    '|-|-|-|-|',
+                    '| `bench_fib_10` | `210ns/iter`<br>(`± 20ns`) | `100ns/iter`<br>(`± 20ns`) | `2.10` |',
+                    '| `bench_fib_20` | `2.25μs/iter`<br>(`± 20ns`) | `900ns/iter`<br>(`± 20ns`) | `2.50` |',
                     '',
                     `This comment was automatically generated by [workflow](${serverUrl}/user/repo/actions?query=workflow%3AWorkflow%20name) using [github-action-benchmark](https://github.com/marketplace/actions/continuous-benchmark).`,
                     '',
@@ -371,14 +500,18 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                     benches: [bench('benchFib10', 20, '+-20', 'ops/sec')], // ops/sec so bigger is better
                 },
                 error: [
-                    '# :warning: **Performance Alert** :warning:',
+                    "# Performance Report for **'Test benchmark'**",
                     '',
-                    "Possible performance regression was detected for benchmark **'Test benchmark'**.",
-                    'Benchmark result of this commit is worse than the previous benchmark result exceeding threshold `2`.',
+                    'Benchmark result(s) exceed ratio of `2`.',
                     '',
-                    '| Benchmark suite | Current: current commit id | Previous: prev commit id | Ratio |',
+                    'Previous commit: prev commit id',
+                    'Current commit: current commit id',
+                    '',
+                    '### :snail: The following benchmarks show regressions:',
+                    '',
+                    '| Benchmark suite | Current | Previous | Ratio |',
                     '|-|-|-|-|',
-                    '| `benchFib10` | `20` ops/sec (`+-20`) | `100` ops/sec (`+-20`) | `5` |',
+                    '| `benchFib10` | `20 ops/sec`<br>(`+-20`) | `100 ops/sec`<br>(`+-20`) | `5` |',
                     '',
                     `This comment was automatically generated by [workflow](${serverUrl}/user/repo/actions?query=workflow%3AWorkflow%20name) using [github-action-benchmark](https://github.com/marketplace/actions/continuous-benchmark).`,
                     '',
@@ -409,14 +542,18 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                     benches: [bench('bench_fib_10', 210)], // Exceeds 2.0 threshold
                 },
                 error: [
-                    '# :warning: **Performance Alert** :warning:',
+                    '# Performance Report',
                     '',
-                    'Possible performance regression was detected for benchmark.',
-                    'Benchmark result of this commit is worse than the previous benchmark result exceeding threshold `2`.',
+                    'Benchmark result(s) exceed ratio of `2`.',
                     '',
-                    '| Benchmark suite | Current: current commit id | Previous: prev commit id | Ratio |',
+                    'Previous commit: prev commit id',
+                    'Current commit: current commit id',
+                    '',
+                    '### :snail: The following benchmarks show regressions:',
+                    '',
+                    '| Benchmark suite | Current | Previous | Ratio |',
                     '|-|-|-|-|',
-                    '| `bench_fib_10` | `210` ns/iter (`± 20`) | `100` ns/iter (`± 20`) | `2.10` |',
+                    '| `bench_fib_10` | `210ns/iter`<br>(`± 20ns`) | `100ns/iter`<br>(`± 20ns`) | `2.10` |',
                     '',
                     `This comment was automatically generated by [workflow](${serverUrl}/user/repo/actions?query=workflow%3AWorkflow%20name) using [github-action-benchmark](https://github.com/marketplace/actions/continuous-benchmark).`,
                     '',
@@ -447,14 +584,18 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                     benches: [bench('bench_fib_10', 210)], // Exceeds 2.0 threshold
                 },
                 error: [
-                    '# :warning: **Performance Alert** :warning:',
+                    "# Performance Report for **'Test benchmark'**",
                     '',
-                    "Possible performance regression was detected for benchmark **'Test benchmark'**.",
-                    'Benchmark result of this commit is worse than the previous benchmark result exceeding threshold `2`.',
+                    'Benchmark result(s) exceed ratio of `2`.',
                     '',
-                    '| Benchmark suite | Current: current commit id | Previous: prev commit id | Ratio |',
+                    'Previous commit: prev commit id',
+                    'Current commit: current commit id',
+                    '',
+                    '### :snail: The following benchmarks show regressions:',
+                    '',
+                    '| Benchmark suite | Current | Previous | Ratio |',
                     '|-|-|-|-|',
-                    '| `bench_fib_10` | `210` ns/iter (`± 20`) | `100` ns/iter (`± 20`) | `2.10` |',
+                    '| `bench_fib_10` | `210ns/iter`<br>(`± 20ns`) | `100ns/iter`<br>(`± 20ns`) | `2.10` |',
                     '',
                     `This comment was automatically generated by [workflow](${serverUrl}/user/repo/actions?query=workflow%3AWorkflow%20name) using [github-action-benchmark](https://github.com/marketplace/actions/continuous-benchmark).`,
                 ],
@@ -588,15 +729,19 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                 // Though first item is truncated due to maxItemsInChart, alert still can be raised since previous data
                 // is obtained before truncating an array of data items.
                 error: [
-                    '# :warning: **Performance Alert** :warning:',
+                    "# Performance Report for **'Test benchmark'**",
                     '',
-                    "Possible performance regression was detected for benchmark **'Test benchmark'**.",
-                    'Benchmark result of this commit is worse than the previous benchmark result exceeding threshold `2`.',
+                    'Benchmark result(s) exceed ratio of `2`.',
                     '',
-                    '| Benchmark suite | Current: current commit id | Previous: prev commit id | Ratio |',
+                    'Previous commit: prev commit id',
+                    'Current commit: current commit id',
+                    '',
+                    '### :snail: The following benchmarks show regressions:',
+                    '',
+                    '| Benchmark suite | Current | Previous | Ratio |',
                     '|-|-|-|-|',
-                    '| `bench_fib_10` | `210` ns/iter (`± 20`) | `100` ns/iter (`± 20`) | `2.10` |',
-                    '| `bench_fib_20` | `25000` ns/iter (`± 20`) | `10000` ns/iter (`± 20`) | `2.50` |',
+                    '| `bench_fib_10` | `210ns/iter`<br>(`± 20ns`) | `100ns/iter`<br>(`± 20ns`) | `2.10` |',
+                    '| `bench_fib_20` | `25μs/iter`<br>(`± 20ns`) | `10μs/iter`<br>(`± 20ns`) | `2.50` |',
                     '',
                     `This comment was automatically generated by [workflow](${serverUrl}/user/repo/actions?query=workflow%3AWorkflow%20name) using [github-action-benchmark](https://github.com/marketplace/actions/continuous-benchmark).`,
                     '',
@@ -605,7 +750,13 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
             },
             {
                 it: 'changes title when threshold is zero which means comment always happens',
-                config: { ...defaultCfg, alertThreshold: 0, failThreshold: 0 },
+                config: {
+                    ...defaultCfg,
+                    alertThreshold: 0,
+                    failThreshold: 0,
+                    commentOnAlert: true,
+                    githubToken: 'dummy token',
+                },
                 data: {
                     lastUpdate,
                     repoUrl,
@@ -626,15 +777,18 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                     tool: 'benchmarkjs',
                     benches: [bench('benchFib10', 100, '+-20', 'ops/sec')],
                 },
-                error: [
+                error: undefined,
+                commentBody: [
                     '# Performance Report',
                     '',
-                    "Possible performance regression was detected for benchmark **'Test benchmark'**.",
-                    'Benchmark result of this commit is worse than the previous benchmark result exceeding threshold `0`.',
+                    "For benchmark **'Test benchmark'**.",
                     '',
-                    '| Benchmark suite | Current: current commit id | Previous: prev commit id | Ratio |',
+                    'Previous commit: prev commit id',
+                    'Current commit: current commit id',
+                    '',
+                    '| Benchmark suite | Current | Previous | Ratio |',
                     '|-|-|-|-|',
-                    '| `benchFib10` | `100` ops/sec (`+-20`) | `100` ops/sec (`+-20`) | `1` |',
+                    '| `benchFib10` | `100 ops/sec`<br>(`+-20`) | `100 ops/sec`<br>(`+-20`) | `1` |',
                     '',
                     `This comment was automatically generated by [workflow](${serverUrl}/user/repo/actions?query=workflow%3AWorkflow%20name) using [github-action-benchmark](https://github.com/marketplace/actions/continuous-benchmark).`,
                     '',
@@ -667,14 +821,18 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                 error: [
                     '1 of 1 alerts exceeded the failure threshold `3` specified by fail-threshold input:',
                     '',
-                    '# :warning: **Performance Alert** :warning:',
+                    "# Performance Report for **'Test benchmark'**",
                     '',
-                    "Possible performance regression was detected for benchmark **'Test benchmark'**.",
-                    'Benchmark result of this commit is worse than the previous benchmark result exceeding threshold `2`.',
+                    'Benchmark result(s) exceed ratio of `2`.',
                     '',
-                    '| Benchmark suite | Current: current commit id | Previous: prev commit id | Ratio |',
+                    'Previous commit: prev commit id',
+                    'Current commit: current commit id',
+                    '',
+                    '### :snail: The following benchmarks show regressions:',
+                    '',
+                    '| Benchmark suite | Current | Previous | Ratio |',
                     '|-|-|-|-|',
-                    '| `bench_fib_10` | `350` ns/iter (`± 20`) | `100` ns/iter (`± 20`) | `3.50` |',
+                    '| `bench_fib_10` | `350ns/iter`<br>(`± 20ns`) | `100ns/iter`<br>(`± 20ns`) | `3.50` |',
                     '',
                     `This comment was automatically generated by [workflow](${serverUrl}/user/repo/actions?query=workflow%3AWorkflow%20name) using [github-action-benchmark](https://github.com/marketplace/actions/continuous-benchmark).`,
                     '',
@@ -709,23 +867,26 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
         ];
 
         it.each(normalCases)('$it', async function (t) {
+            const { data, added, config, repoPayload, error, commitComment, commentBody } = t;
+            const expectedAdded = t.expectedAdded ?? added;
+
             gitHubContext.payload.repository = {
                 private: false,
                 html_url: `${serverUrl}/user/repo`,
             } as RepositoryPayloadSubset | null;
 
-            if (t.repoPayload !== undefined) {
-                gitHubContext.payload.repository = t.repoPayload;
+            if (repoPayload !== undefined) {
+                gitHubContext.payload.repository = repoPayload;
             }
-            if (t.data !== null) {
-                await fs.writeFile(dataJson, JSON.stringify(t.data), 'utf8');
+            if (data !== null) {
+                await fs.writeFile(dataJson, JSON.stringify(data), 'utf8');
             }
 
             let caughtError: Error | null = null;
             try {
-                await writeBenchmark(t.added, t.config);
+                await writeBenchmark(added, config);
             } catch (err: any) {
-                if (!t.error && !t.commitComment) {
+                if (!error && !commitComment && commentBody === undefined) {
                     throw err;
                 }
                 caughtError = err;
@@ -734,24 +895,24 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
             const json: DataJson = JSON.parse(await fs.readFile(dataJson, 'utf8'));
 
             expect('number').toEqual(typeof json.lastUpdate);
-            expect(json.entries[t.config.name]).toBeTruthy();
-            const len = json.entries[t.config.name].length;
+            expect(json.entries[config.name]).toBeTruthy();
+            const len = json.entries[config.name].length;
             ok(len > 0);
-            expect(t.added).toEqual(json.entries[t.config.name][len - 1]); // Check last item is the newest
+            expect(expectedAdded).toEqual(json.entries[config.name][len - 1]); // Check the last item is the newest
 
-            if (t.data !== null) {
-                ok(json.lastUpdate > t.data.lastUpdate);
-                expect(t.data.repoUrl).toEqual(json.repoUrl);
-                for (const name of Object.keys(t.data.entries)) {
-                    const entries = t.data.entries[name];
-                    if (name === t.config.name) {
-                        if (t.config.maxItemsInChart === null || len < t.config.maxItemsInChart) {
+            if (data !== null) {
+                ok(json.lastUpdate > data.lastUpdate);
+                expect(data.repoUrl).toEqual(json.repoUrl);
+                for (const name of Object.keys(data.entries)) {
+                    const entries = data.entries[name];
+                    if (name === config.name) {
+                        if (config.maxItemsInChart === null || len < config.maxItemsInChart) {
                             expect(entries.length + 1).toEqual(len);
                             // Check benchmark data except for the last appended one are not modified
                             expect(entries).toEqual(json.entries[name].slice(0, -1));
                         } else {
-                            // When data items was truncated due to max-items-in-chart
-                            expect(entries.length).toEqual(len); // Number of items did not change because first item was shifted
+                            // When data items were truncated due to max-items-in-chart
+                            expect(entries.length).toEqual(len); // The Number of items did not change because the first item was shifted
                             expect(entries.slice(1)).toEqual(json.entries[name].slice(0, -1));
                         }
                     } else {
@@ -760,29 +921,33 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                 }
             }
 
-            if (t.error) {
+            if (error) {
                 ok(caughtError);
-                const expected = t.error.join('\n');
+                const expected = error.join('\n');
                 expect(caughtError.message).toEqual(expected);
             }
 
-            if (t.commitComment !== undefined) {
-                ok(caughtError);
-                // Last line is appended only for failure message
-                const messageLines = caughtError.message.split('\n');
-                ok(messageLines.length > 0);
-                const expectedMessage = wrapBodyWithBenchmarkTags(
-                    'Test benchmark Alert',
-                    messageLines.slice(0, -1).join('\n'),
-                );
-                ok(fakedRepos.spyOpts.length > 0, `len: ${fakedRepos.spyOpts.length}, caught: ${caughtError.message}`);
+            if (commitComment !== undefined || commentBody !== undefined) {
+                ok(fakedRepos.spyOpts.length > 0, `len: ${fakedRepos.spyOpts.length}`);
                 const opts = fakedRepos.lastCall();
                 expect('user').toEqual(opts.owner);
                 expect('repo').toEqual(opts.repo);
                 expect('current commit id').toEqual(opts.commit_sha);
+
+                let rawBody: string;
+                if (commentBody !== undefined) {
+                    rawBody = commentBody.join('\n');
+                } else {
+                    ok(caughtError);
+                    // Last line is appended only for failure message
+                    const messageLines = caughtError.message.split('\n');
+                    ok(messageLines.length > 0);
+                    rawBody = messageLines.slice(0, -1).join('\n');
+                    const commentLine = messageLines[messageLines.length - 1];
+                    expect(commitComment).toEqual(commentLine);
+                }
+                const expectedMessage = wrapBodyWithBenchmarkTags('Test benchmark Alert', rawBody);
                 expect(expectedMessage).toEqual(opts.body);
-                const commentLine = messageLines[messageLines.length - 1];
-                expect(t.commitComment).toEqual(commentLine);
 
                 // Check the body is a correct markdown document by markdown parser
                 // Validate markdown content via HTML
@@ -792,10 +957,16 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
 
                 const h1 = query('h1');
                 expect(1).toEqual(h1.length);
-                expect(':warning: Performance Alert :warning:').toEqual(h1.text());
+                const benchmarkText =
+                    config.alertThreshold === 0
+                        ? ''
+                        : config.name === 'Benchmark'
+                        ? ''
+                        : ` for '${config.name}'`;
+                expect(`Performance Report${benchmarkText}`).toEqual(h1.text());
 
                 const tr = query('tbody tr');
-                expect(t.added.benches.length).toEqual(tr.length);
+                expect(added.benches.length).toEqual(tr.length);
 
                 const a = query('a');
                 expect(2).toEqual(a.length);
@@ -809,6 +980,106 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                 expect('github-action-benchmark').toEqual(actionLink.text());
                 expect('https://github.com/marketplace/actions/continuous-benchmark').toEqual(actionLink.attr('href'));
             }
+        });
+
+        describe('when no alert is detected and comment-on-alert is enabled', function () {
+            const prevSuite: Benchmark = {
+                commit: commit('prev commit id'),
+                date: lastUpdate - 1000,
+                tool: 'cargo',
+                benches: [bench('bench_fib_10', 100)],
+            };
+            const curSuite: Benchmark = {
+                commit: commit('current commit id'),
+                date: lastUpdate,
+                tool: 'cargo',
+                benches: [bench('bench_fib_10', 110)], // Ratio 1.1 < 2.0 so no alert is detected
+            };
+            const cfg: Config = {
+                ...defaultCfg,
+                commentOnAlert: true,
+                githubToken: 'dummy token',
+                failOnAlert: false,
+            };
+
+            beforeEach(async function () {
+                await fs.writeFile(
+                    dataJson,
+                    JSON.stringify({
+                        lastUpdate,
+                        repoUrl,
+                        entries: { 'Test benchmark': [prevSuite] },
+                    }),
+                    'utf8',
+                );
+            });
+
+            it('replaces an existing alert commit comment on the previous commit with a no-alerts message', async function () {
+                fakedRepos.setCommitComments([
+                    { id: 123, body: wrapBodyWithBenchmarkTags('Test benchmark Alert', 'old alert body') },
+                ]);
+
+                await writeBenchmark(curSuite, cfg);
+
+                expect(fakedRepos.updatedCommitComments).toHaveLength(1);
+                const opts = fakedRepos.updatedCommitComments[0];
+                expect(opts.owner).toEqual('user');
+                expect(opts.repo).toEqual('repo');
+                expect(opts.comment_id).toEqual(123);
+                const body = opts.body;
+                expect(body.startsWith(benchmarkStartTag('Test benchmark Alert'))).toBe(true);
+                expect(body).toContain("No performance alerts for **'Test benchmark'**.");
+                expect(body).toContain('Previous commit: prev commit id');
+                expect(body).toContain('Current commit: current commit id');
+                expect(fakedRepos.spyOpts).toHaveLength(0); // No new commit comment was created
+            });
+
+            it('does not leave any comment when no previous alert commit comment exists', async function () {
+                fakedRepos.setCommitComments([]);
+
+                await writeBenchmark(curSuite, cfg);
+
+                expect(fakedRepos.updatedCommitComments).toHaveLength(0);
+                expect(fakedRepos.spyOpts).toHaveLength(0);
+            });
+
+            it('replaces an existing alert PR review comment with a no-alerts message', async function () {
+                gitHubContext.payload.pull_request = { number: 1 };
+                try {
+                    fakedPulls.setReviews([
+                        { id: 456, body: wrapBodyWithBenchmarkTags('Test benchmark Alert', 'old alert body') },
+                    ]);
+
+                    await writeBenchmark(curSuite, cfg);
+
+                    const updateCalls = fakedPulls.reviewCalls.filter((c) => c.method === 'updateReview');
+                    expect(updateCalls).toHaveLength(1);
+                    const opts = updateCalls[0].opts;
+                    expect(opts.owner).toEqual('user');
+                    expect(opts.repo).toEqual('repo');
+                    expect(opts.pull_number).toEqual(1);
+                    expect(opts.review_id).toEqual(456);
+                    expect(opts.body).toContain("No performance alerts for **'Test benchmark'**.");
+                    expect(opts.body).toContain('Previous commit: prev commit id');
+                    expect(opts.body).toContain('Current commit: current commit id');
+                    expect(fakedPulls.reviewCalls.filter((c) => c.method === 'createReview')).toHaveLength(0);
+                } finally {
+                    gitHubContext.payload.pull_request = null;
+                }
+            });
+
+            it('does not create a PR review comment when no previous alert comment exists', async function () {
+                gitHubContext.payload.pull_request = { number: 1 };
+                try {
+                    fakedPulls.setReviews([]);
+
+                    await writeBenchmark(curSuite, cfg);
+
+                    expect(fakedPulls.reviewCalls).toHaveLength(0);
+                } finally {
+                    gitHubContext.payload.pull_request = null;
+                }
+            });
         });
     });
 
@@ -886,6 +1157,7 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
             maxItemsInChart: null,
             failThreshold: 2.0,
             ref: undefined,
+            goForcePackageSuffix: false,
         };
 
         function gitHistory(
@@ -1155,14 +1427,46 @@ describe.each(['https://github.com', 'https://github.enterprise.corp'])('writeBe
                 gitServerUrl: serverUrl,
                 gitHistory: gitHistory(),
                 error: [
-                    '# :warning: **Performance Alert** :warning:',
+                    "# Performance Report for **'Test benchmark'**",
                     '',
-                    "Possible performance regression was detected for benchmark **'Test benchmark'**.",
-                    'Benchmark result of this commit is worse than the previous benchmark result exceeding threshold `2`.',
+                    'Benchmark result(s) exceed ratio of `2`.',
                     '',
-                    '| Benchmark suite | Current: current commit id | Previous: prev commit id | Ratio |',
+                    'Previous commit: prev commit id',
+                    'Current commit: current commit id',
+                    '',
+                    '### :snail: The following benchmarks show regressions:',
+                    '',
+                    '| Benchmark suite | Current | Previous | Ratio |',
                     '|-|-|-|-|',
-                    '| `bench_fib_10` | `210` ns/iter (`± 20`) | `100` ns/iter (`± 20`) | `2.10` |',
+                    '| `bench_fib_10` | `210ns/iter`<br>(`± 20ns`) | `100ns/iter`<br>(`± 20ns`) | `2.10` |',
+                    '',
+                    `This comment was automatically generated by [workflow](${serverUrl}/user/repo/actions?query=workflow%3AWorkflow%20name) using [github-action-benchmark](https://github.com/marketplace/actions/continuous-benchmark).`,
+                ],
+            },
+            {
+                it: 'fails when exceeding the threshold - different units',
+                config: defaultCfg,
+                added: {
+                    commit: commit('current commit id'),
+                    date: lastUpdate,
+                    tool: 'cargo',
+                    benches: [bench('bench_fib_10', 0.21, '± 0.02', 'us/iter')], // Exceeds 2.0 threshold
+                },
+                gitServerUrl: serverUrl,
+                gitHistory: gitHistory(),
+                error: [
+                    "# Performance Report for **'Test benchmark'**",
+                    '',
+                    'Benchmark result(s) exceed ratio of `2`.',
+                    '',
+                    'Previous commit: prev commit id',
+                    'Current commit: current commit id',
+                    '',
+                    '### :snail: The following benchmarks show regressions:',
+                    '',
+                    '| Benchmark suite | Current | Previous | Ratio |',
+                    '|-|-|-|-|',
+                    '| `bench_fib_10` | `210ns/iter`<br>(`± 20ns`) | `100ns/iter`<br>(`± 20ns`) | `2.10` |',
                     '',
                     `This comment was automatically generated by [workflow](${serverUrl}/user/repo/actions?query=workflow%3AWorkflow%20name) using [github-action-benchmark](https://github.com/marketplace/actions/continuous-benchmark).`,
                 ],

@@ -1,5 +1,33 @@
 ## Unreleased
 
+<a name="v1.22.1"></a>
+# [v1.22.1](https://github.com/benchmark-action/github-action-benchmark/releases/tag/v1.22.1) - 6 May 2026
+- **fix** scope tsconfig.build.json to src/ for reproducibility (#352)
+- **chore** bump minimatch from 3.1.2 to 3.1.5 (#347)
+- **chore** bump uuid and @actions/core (#350)
+- **chore** bump flatted from 3.2.4 to 3.4.2 (#346)
+- **chore** bump js-yaml (#344)
+- **chore** bump picomatch from 2.3.0 to 2.3.2 (#342)
+
+<a name="v1.22.0"></a>
+# [v1.22.0](https://github.com/benchmark-action/github-action-benchmark/releases/tag/v1.22.0) - 31 Mar 2026
+- **chore** bump node to 24 (#339)
+
+<a name="v1.21.0"></a>
+# [v1.21.0](https://github.com/benchmark-action/github-action-benchmark/releases/tag/v1.21.0) - 02 Mar 2026
+- **fix** include package name for duplicate bench names (#330)
+- **fix** avoid duplicate package suffix in Go benchmarks (#337)
+
+<a name="v1.20.7"></a>
+# [v1.20.7](https://github.com/benchmark-action/github-action-benchmark/releases/tag/v1.20.7) - 06 Sep 2025
+- **fix** improve parsing for custom benchmarks (#323)
+
+<a name="v1.20.5"></a>
+# [v1.20.5](https://github.com/benchmark-action/github-action-benchmark/releases/tag/v1.20.5) - 02 Sep 2025
+- **feat** allow to parse generic cargo bench/criterion units (#280)
+- **fix** add summary even when failure threshold is surpassed (#285)
+- **fix** time units are not normalized (#318)
+
 <a name="v1.20.4"></a>
 # [v1.20.4](https://github.com/benchmark-action/github-action-benchmark/releases/tag/v1.20.4) - 23 Oct 2024
 - **feat** add typings and validation workflow (#257)

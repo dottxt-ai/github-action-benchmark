@@ -8,7 +8,8 @@ import { Benchmark, BenchmarkResult } from './extract';
 import { Config, ToolType } from './config';
 import { DEFAULT_INDEX_HTML } from './default_index_html';
 import { leavePRComment } from './comment/leavePRComment';
-import { leaveCommitComment } from './comment/leaveCommitComment';
+import { leaveCommitComment, updateCommitCommentIfExists } from './comment/leaveCommitComment';
+import { addBenchmarkEntry } from './addBenchmarkEntry';
 
 export type BenchmarkSuites = { [name: string]: Benchmark[] };
 export interface DataJson {
@@ -347,6 +348,28 @@ function buildAlertComment(
     return lines.join('\n');
 }
 
+function buildNoAlertsComment(benchName: string, curSuite: Benchmark, prevSuite: Benchmark, cc: string[]): string {
+    // Do not show benchmark name if it is the default value 'Benchmark'.
+    const benchmarkText = benchName === 'Benchmark' ? '' : ` for **'${benchName}'**`;
+    const lines = [
+        '# Performance Report',
+        '',
+        `No performance alerts${benchmarkText}.`,
+        '',
+        `Previous commit: ${prevSuite.commit.id}`,
+        `Current commit: ${curSuite.commit.id}`,
+    ];
+
+    // Footer
+    lines.push('', commentFooter());
+
+    if (cc.length > 0) {
+        lines.push('', `CC: ${cc.join(' ')}`);
+    }
+
+    return lines.join('\n');
+}
+
 async function leaveComment(commitId: string, body: string, commentId: string, token: string) {
     core.debug('Sending comment:\n' + body);
 
@@ -377,6 +400,37 @@ async function handleComment(benchName: string, curSuite: Benchmark, prevSuite: 
     await leaveComment(curSuite.commit.id, body, `${benchName} Summary`, githubToken);
 }
 
+async function replaceAlertCommentWithNoAlerts(body: string, commentId: string, token: string, prevCommitId: string) {
+    core.debug('Replacing an existing alert comment with a no-alerts message:\n' + body);
+
+    const repoMetadata = getCurrentRepoMetadata();
+    const pr = github.context.payload.pull_request;
+
+    if (pr?.number) {
+        // PR review comments are updated in place, so only update an existing alert comment
+        return await leavePRComment(
+            repoMetadata.owner.login,
+            repoMetadata.name,
+            pr.number,
+            body,
+            commentId,
+            token,
+            true,
+        );
+    }
+
+    // Commit comments are attached to the commit where the alert was detected. When the alert is
+    // resolved, update the alert comment left on the previous commit.
+    return await updateCommitCommentIfExists(
+        repoMetadata.owner.login,
+        repoMetadata.name,
+        prevCommitId,
+        body,
+        commentId,
+        token,
+    );
+}
+
 async function handleAlert(benchName: string, curSuite: Benchmark, prevSuite: Benchmark, config: Config) {
     const { alertThreshold, githubToken, commentOnAlert, failOnAlert, alertCommentCcUsers, failThreshold } = config;
 
@@ -388,7 +442,19 @@ async function handleAlert(benchName: string, curSuite: Benchmark, prevSuite: Be
     const [losses, gains] = findAlerts(curSuite, prevSuite, alertThreshold);
     const alerts = [...losses, ...gains];
     if (alerts.length === 0) {
-        core.debug('No performance alert found happily');
+        if (commentOnAlert) {
+            if (!githubToken) {
+                throw new Error("'comment-on-alert' input is set but 'github-token' input is not set");
+            }
+            // When a previous alert comment exists (e.g. an alert was left on an earlier commit of
+            // this PR), replace it with a message saying that no alerts are detected anymore instead
+            // of leaving the stale alert comment. Do not create a new comment when none exists.
+            core.debug('No performance alert was found. Replacing an existing alert comment with a no-alerts message');
+            const body = buildNoAlertsComment(benchName, curSuite, prevSuite, alertCommentCcUsers);
+            await replaceAlertCommentWithNoAlerts(body, `${benchName} Alert`, githubToken, prevSuite.commit.id);
+        } else {
+            core.debug('No performance alert found happily');
+        }
         return;
     }
 
@@ -408,8 +474,10 @@ async function handleAlert(benchName: string, curSuite: Benchmark, prevSuite: Be
             throw new Error("'comment-on-alert' input is set but 'github-token' input is not set");
         }
         const res = await leaveComment(curSuite.commit.id, body, `${benchName} Alert`, githubToken);
-        const url = res.data.html_url;
-        message = body + `\nComment was generated at ${url}`;
+        if (res) {
+            const url = res.data.html_url;
+            message = body + `\nComment was generated at ${url}`;
+        }
     }
 
     if (failOnAlert) {
@@ -427,7 +495,7 @@ async function handleAlert(benchName: string, curSuite: Benchmark, prevSuite: Be
         } else {
             core.debug(
                 `${len} alerts exceeding the alert threshold ${alertThreshold} were found but` +
-                    ` all of them did not exceed the failure threshold ${threshold}`,
+                    ` none of them exceeded the failure threshold ${threshold}`,
             );
         }
     }
@@ -438,39 +506,16 @@ function addBenchmarkToDataJson(
     bench: Benchmark,
     data: DataJson,
     maxItems: number | null,
-): Benchmark | null {
+): { prevBench: Benchmark | null; normalizedCurrentBench: Benchmark } {
     const repoMetadata = getCurrentRepoMetadata();
     const htmlUrl = repoMetadata.html_url ?? '';
 
-    let prevBench: Benchmark | null = null;
     data.lastUpdate = Date.now();
     data.repoUrl = htmlUrl;
 
-    // Add benchmark result
-    if (data.entries[benchName] === undefined) {
-        data.entries[benchName] = [bench];
-        core.debug(`No suite was found for benchmark '${benchName}' in existing data. Created`);
-    } else {
-        const suites = data.entries[benchName];
-        // Get last suite which has different commit ID for alert comment
-        for (const e of suites.slice().reverse()) {
-            if (e.commit.id !== bench.commit.id) {
-                prevBench = e;
-                break;
-            }
-        }
+    const { prevBench, normalizedCurrentBench } = addBenchmarkEntry(benchName, bench, data.entries, maxItems);
 
-        suites.push(bench);
-
-        if (maxItems !== null && suites.length > maxItems) {
-            suites.splice(0, suites.length - maxItems);
-            core.debug(
-                `Number of data items for '${benchName}' was truncated to ${maxItems} due to max-items-in-charts`,
-            );
-        }
-    }
-
-    return prevBench;
+    return { prevBench, normalizedCurrentBench };
 }
 
 function isRemoteRejectedError(err: unknown): err is Error {
@@ -484,7 +529,7 @@ async function writeBenchmarkToGitHubPagesWithRetry(
     bench: Benchmark,
     config: Config,
     retry: number,
-): Promise<Benchmark | null> {
+): Promise<{ prevBench: Benchmark | null; normalizedCurrentBench: Benchmark }> {
     const {
         name,
         tool,
@@ -538,7 +583,7 @@ async function writeBenchmarkToGitHubPagesWithRetry(
     await io.mkdirP(benchmarkDataDirFullPath);
 
     const data = await loadDataJs(dataPath);
-    const prevBench = addBenchmarkToDataJson(name, bench, data, maxItemsInChart);
+    const { prevBench, normalizedCurrentBench } = addBenchmarkToDataJson(name, bench, data, maxItemsInChart);
 
     await storeDataJs(dataPath, data);
 
@@ -586,10 +631,13 @@ async function writeBenchmarkToGitHubPagesWithRetry(
         );
     }
 
-    return prevBench;
+    return { prevBench, normalizedCurrentBench };
 }
 
-async function writeBenchmarkToGitHubPages(bench: Benchmark, config: Config): Promise<Benchmark | null> {
+async function writeBenchmarkToGitHubPages(
+    bench: Benchmark,
+    config: Config,
+): Promise<{ prevBench: Benchmark | null; normalizedCurrentBench: Benchmark }> {
     const { ghPagesBranch, skipFetchGhPages, ghRepository, githubToken } = config;
     if (!ghRepository) {
         if (!skipFetchGhPages) {
@@ -625,14 +673,14 @@ async function writeBenchmarkToExternalJson(
     bench: Benchmark,
     jsonFilePath: string,
     config: Config,
-): Promise<Benchmark | null> {
+): Promise<{ prevBench: Benchmark | null; normalizedCurrentBench: Benchmark }> {
     const { name, maxItemsInChart, saveDataFile } = config;
     const data = await loadDataJson(jsonFilePath);
-    const prevBench = addBenchmarkToDataJson(name, bench, data, maxItemsInChart);
+    const { prevBench, normalizedCurrentBench } = addBenchmarkToDataJson(name, bench, data, maxItemsInChart);
 
     if (!saveDataFile) {
         core.debug('Skipping storing benchmarks in external data file');
-        return prevBench;
+        return { prevBench, normalizedCurrentBench };
     }
 
     try {
@@ -643,12 +691,12 @@ async function writeBenchmarkToExternalJson(
         throw new Error(`Could not store benchmark data as JSON at ${jsonFilePath}: ${err}`);
     }
 
-    return prevBench;
+    return { prevBench, normalizedCurrentBench };
 }
 
 export async function writeBenchmark(bench: Benchmark, config: Config) {
     const { name, externalDataJsonPath } = config;
-    const prevBench = externalDataJsonPath
+    const { prevBench, normalizedCurrentBench } = externalDataJsonPath
         ? await writeBenchmarkToExternalJson(bench, externalDataJsonPath, config)
         : await writeBenchmarkToGitHubPages(bench, config);
 
@@ -657,9 +705,9 @@ export async function writeBenchmark(bench: Benchmark, config: Config) {
     if (prevBench === null) {
         core.debug('Alert check was skipped because previous benchmark result was not found');
     } else {
-        await handleComment(name, bench, prevBench, config);
-        await handleSummary(name, bench, prevBench, config);
-        await handleAlert(name, bench, prevBench, config);
+        await handleComment(name, normalizedCurrentBench, prevBench, config);
+        await handleSummary(name, normalizedCurrentBench, prevBench, config);
+        await handleAlert(name, normalizedCurrentBench, prevBench, config);
     }
 }
 
