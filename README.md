@@ -448,7 +448,7 @@ Otherwise, you need to push it by your own. Please read 'Commit comment' section
 - Type: Boolean
 - Default: `false`
 
-If it is set to `true`, this action will leave a commit comment comparing the current benchmark with previous.
+If it is set to `true`, this action will leave a comment with the current benchmark results and, when available, a comparison with previous results. New benchmarks are shown without a previous value or ratio.
 `github-token` is necessary as well.
 
 #### `save-data-file` (Optional)

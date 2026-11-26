@@ -216,7 +216,7 @@ function commentFooter(): string {
 export function buildComment(
     benchName: string,
     curSuite: Benchmark,
-    prevSuite: Benchmark,
+    prevSuite: Benchmark | null,
     expandableDetails = true,
 ): string {
     const lines = [
@@ -224,7 +224,7 @@ export function buildComment(
         '',
         expandableDetails ? '<details>' : '',
         '',
-        `Previous: ${prevSuite.commit.id}`,
+        `Previous: ${prevSuite ? prevSuite.commit.id : 'no previous results'}`,
         `Current: ${curSuite.commit.id}`,
         '',
         `| Benchmark suite | Current | Previous | Ratio |`,
@@ -233,14 +233,14 @@ export function buildComment(
 
     for (const current of curSuite.benches) {
         let line;
-        const prev = prevSuite.benches.find((i) => i.name === current.name);
+        const prev = prevSuite?.benches.find((i) => i.name === current.name);
 
         if (prev) {
             const ratio = getRatio(curSuite.tool, prev, current);
 
             line = `| \`${current.name}\` | ${strVal(current)} | ${strVal(prev)} | \`${floatStr(ratio)}\` |`;
         } else {
-            line = `| \`${current.name}\` | ${strVal(current)} | | |`;
+            line = `| \`${current.name}\` | ${strVal(current)} | — | — |`;
         }
 
         lines.push(line);
@@ -358,7 +358,7 @@ async function leaveComment(commitId: string, body: string, commentId: string, t
         : leaveCommitComment(repoMetadata.owner.login, repoMetadata.name, commitId, body, commentId, token));
 }
 
-async function handleComment(benchName: string, curSuite: Benchmark, prevSuite: Benchmark, config: Config) {
+async function handleComment(benchName: string, curSuite: Benchmark, prevSuite: Benchmark | null, config: Config) {
     const { commentAlways, githubToken } = config;
 
     if (!commentAlways) {
@@ -654,16 +654,16 @@ export async function writeBenchmark(bench: Benchmark, config: Config) {
 
     // Put this after `git push` for reducing possibility to get conflict on push. Since sending
     // comment take time due to API call, do it after updating remote branch.
+    await handleComment(name, bench, prevBench, config);
+    await handleSummary(name, bench, prevBench, config);
     if (prevBench === null) {
         core.debug('Alert check was skipped because previous benchmark result was not found');
     } else {
-        await handleComment(name, bench, prevBench, config);
-        await handleSummary(name, bench, prevBench, config);
         await handleAlert(name, bench, prevBench, config);
     }
 }
 
-async function handleSummary(benchName: string, currBench: Benchmark, prevBench: Benchmark, config: Config) {
+async function handleSummary(benchName: string, currBench: Benchmark, prevBench: Benchmark | null, config: Config) {
     const { summaryAlways } = config;
 
     if (!summaryAlways) {
